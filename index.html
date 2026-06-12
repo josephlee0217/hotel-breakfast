@@ -1388,7 +1388,13 @@ function processFile(file) {
   const reader = new FileReader();
 
   if (name.endsWith('.pdf')) {
-    reader.onload = async e => {
+    // Ensure pdf.js is loaded before processing
+    const waitForPdfJs = (cb) => {
+      if (typeof pdfjsLib !== 'undefined' && pdfjsLib.getDocument) { cb(); }
+      else { setTimeout(() => waitForPdfJs(cb), 200); }
+    };
+    waitForPdfJs(() => {
+      reader.onload = async e => {
       try {
         const typedArray = new Uint8Array(e.target.result);
         const loadingTask = pdfjsLib.getDocument({data: typedArray});
@@ -1512,7 +1518,8 @@ function processFile(file) {
         console.error(err);
       }
     };
-    reader.readAsArrayBuffer(file);
+      reader.readAsArrayBuffer(file);
+    }); // end waitForPdfJs
     return;
   }
 
@@ -2327,9 +2334,17 @@ function clearEntries() {
 function clearGuests() {
   const d = document.getElementById('clear-date').value;
   if (!d) { showToast('請選擇日期', 'error'); return; }
-  if (!confirm(`確定要清除 ${d} 的全部住客資料嗎？此操作不可復原！`)) return;
+  if (!confirm(`確定要清除 ${d} 的全部住客及桌位資料嗎？此操作不可復原！`)) return;
   run(`DELETE FROM guest_stays WHERE stay_date=?`, [d]);
-  showToast(`✅ 已清除 ${d} 住客資料`, 'success');
+  run(`DELETE FROM breakfast_entitlements WHERE stay_date=?`, [d]);
+  run(`DELETE FROM breakfast_entries WHERE entry_date=?`, [d]);
+  run(`DELETE FROM breakfast_purchases WHERE purchase_date=?`, [d]);
+  run(`DELETE FROM table_assignments WHERE assign_date=?`, [d]);
+  run(`DELETE FROM room_traffic WHERE traffic_date=?`, [d]);
+  run(`DELETE FROM walkin_guests WHERE walkin_date=?`, [d]);
+  run(`DELETE FROM exception_logs WHERE log_date=?`, [d]);
+  saveDB();
+  showToast(`✅ 已清除 ${d} 所有資料`, 'success');
 }
 
 function exportDB() {

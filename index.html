@@ -1351,40 +1351,120 @@ function processFile(file) {
         const typedArray = new Uint8Array(e.target.result);
         const loadingTask = pdfjsLib.getDocument({data: typedArray});
         const pdf = await loadingTask.promise;
-        let fullText = '';
+
+        // Collect ALL items with x,y positions across all pages
+        let allItems = [];
         for (let p = 1; p <= pdf.numPages; p++) {
           const page = await pdf.getPage(p);
+          const vp = page.getViewport({scale: 1});
           const content = await page.getTextContent();
-          const items = content.items;
-
-          // Group items by y-position (same line = within 3px)
-          const lineMap = new Map();
-          for (const item of items) {
-            const y = Math.round(item.transform[5] / 3) * 3; // bucket by 3px
-            const x = item.transform[4];
-            if (!lineMap.has(y)) lineMap.set(y, []);
-            lineMap.get(y).push({x, str: item.str});
-          }
-
-          // Sort lines top-to-bottom (descending y in PDF coords), items left-to-right
-          const sortedYs = [...lineMap.keys()].sort((a,b) => b - a);
-          for (const y of sortedYs) {
-            const lineItems = lineMap.get(y).sort((a,b) => a.x - b.x);
-            const lineText = lineItems.map(i => i.str).join(' ').trim();
-            if (lineText) fullText += lineText + '\n';
+          for (const item of content.items) {
+            allItems.push({
+              str: item.str.trim(),
+              x: Math.round(item.transform[4]),
+              // Convert PDF y (bottom-up) to top-down, offset by page
+              y: Math.round(vp.height - item.transform[5]) + (p - 1) * 10000,
+              page: p
+            });
           }
         }
-        console.log('PDF TEXT:', fullText.substring(0, 800));
-        const data = parsePDFMealPlan(fullText);
-        if (data.length === 0) {
-          const preview = fullText.substring(0, 600);
-          showToast(`⚠️ PDF 解析失敗（${pdf.numPages}頁）`, 'error');
-          document.getElementById('import-preview').innerHTML =
-            `<div class="alert alert-error">解析失敗，原始文字：<br><pre style="font-size:11px;white-space:pre-wrap;margin-top:8px">${preview}</pre></div>`;
-          document.getElementById('import-preview').style.display='block';
+
+        // Find Breakfast column x from header
+        let bfX = null, dinnerX = null;
+        for (const item of allItems) {
+          if (item.str === 'Breakfast') bfX = item.x;
+          if (item.str === 'Dinner') dinnerX = item.x;
+        }
+        console.log('Breakfast x:', bfX, 'Dinner x:', dinnerX);
+
+        // Build line groups by y (within 4px)
+        const lineMap = new Map();
+        for (const item of allItems) {
+          if (!item.str) continue;
+          const yKey = Math.round(item.y / 4) * 4;
+          if (!lineMap.has(yKey)) lineMap.set(yKey, []);
+          lineMap.get(yKey).push(item);
+        }
+
+        // Sort lines top-to-bottom, items left-to-right
+        const sortedLines = [...lineMap.entries()]
+          .sort((a,b) => a[0] - b[0])
+          .map(([y, items]) => ({y, items: items.sort((a,b) => a.x - b.x)}));
+
+        // Parse each line
+        const fractionRe = /^(\d+)\/(\d+)\/\d+\/\d+\/\d+$/;
+        const dateRe = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
+        let currentDate = null;
+        const results = [];
+        const skipPfx = ['PdC','protel','Palais','Print','Page:','Room','phvlig','The','1.01','Total','Meal'];
+
+        for (const {items} of sortedLines) {
+          const lineStr = items.map(i => i.str).join(' ').trim();
+          if (!lineStr || skipPfx.some(w => lineStr.startsWith(w))) continue;
+
+          // Date header line
+          const dm = lineStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+          if (dm) {
+            currentDate = `${dm[3]}-${dm[1].padStart(2,'0')}-${dm[2].padStart(2,'0')}`;
+            continue;
+          }
+
+          // Data row: must have a 4-digit room number and fraction values
+          const roomItem = items.find(i => /^\d{4}$/.test(i.str));
+          if (!roomItem || !currentDate) continue;
+
+          // Get fraction items on this line
+          const fractions = items.filter(i => fractionRe.test(i.str));
+          if (fractions.length === 0) continue;
+
+          // Pick Breakfast fraction: closest x to bfX, or first fraction if bfX unknown
+          let bfFraction = fractions[0];
+          if (bfX !== null) {
+            bfFraction = fractions.reduce((best, cur) =>
+              Math.abs(cur.x - bfX) < Math.abs(best.x - bfX) ? cur : best
+            );
+          }
+
+          const fm = bfFraction.str.match(fractionRe);
+          const portions = parseInt(fm[1]) + parseInt(fm[2]);
+
+          // Get date items (CI/CO)
+          const dateItems = items.filter(i => dateRe.test(i.str));
+
+          // Name = all items before the room number item, joined
+          const roomIdx = items.indexOf(roomItem);
+          const nameParts = items.slice(0, roomIdx).map(i => i.str).filter(Boolean);
+          const guestName = nameParts.join(' ').trim();
+          if (!guestName) continue;
+
+          let ciDate = currentDate, coDate = currentDate;
+          if (dateItems.length >= 2) {
+            const d1 = dateItems[0].str.split('/');
+            const d2 = dateItems[1].str.split('/');
+            ciDate = `${d1[2]}-${d1[0].padStart(2,'0')}-${d1[1].padStart(2,'0')}`;
+            coDate = `${d2[2]}-${d2[0].padStart(2,'0')}-${d2[1].padStart(2,'0')}`;
+          }
+
+          results.push({
+            stay_date: currentDate,
+            room_number: roomItem.str,
+            guest_name: guestName,
+            has_breakfast: portions > 0 ? '1' : '0',
+            total_portions: String(portions),
+            used_portions: '0',
+            checkin_date: ciDate,
+            checkout_date: coDate,
+            adults: fm[1],
+            children: fm[2],
+          });
+        }
+
+        console.log('Parsed rows:', results.length, results.slice(0,3));
+        if (results.length === 0) {
+          showToast('⚠️ PDF 解析失敗，請確認為 protel Meal Plan 格式', 'error');
           return;
         }
-        showImportPreview(data);
+        showImportPreview(results);
       } catch(err) {
         showToast('PDF 讀取失敗：' + err.message, 'error');
         console.error(err);

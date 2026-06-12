@@ -1188,7 +1188,9 @@ function checkTableConflict(d) {
   if (!tableNo) { msgEl.innerHTML = ''; return; }
   const conflict = q(`SELECT room_number FROM table_assignments WHERE assign_date=? AND table_number=? AND is_active=1`, [d, tableNo])[0];
   if (conflict) {
-    msgEl.innerHTML = `<span style="color:var(--red)">🚫 桌號 ${tableNo} 已由 ${conflict.room_number} 號房使用中</span>`;
+    msgEl.innerHTML = `<span style="color:var(--red)">🚫 桌號 ${tableNo} 由 ${conflict.room_number} 號房使用中</span>
+      <button class="btn btn-sm btn-warning" style="margin-left:12px"
+        onclick="releaseTableInline('${tableNo}','${d}')">✅ 已離座，釋放此桌</button>`;
     document.getElementById('admit-table').style.borderColor = 'var(--red)';
   } else {
     msgEl.innerHTML = `<span style="color:var(--green)">✅ 桌號 ${tableNo} 可使用</span>`;
@@ -1869,6 +1871,15 @@ function refreshDashboard() {
   if (wkEl) wkEl.innerHTML = wkTbody || '<tr><td colspan="8" style="text-align:center;color:#aaa">尚無外客記錄</td></tr>';
 }
 
+function releaseTableInline(tableNo, d) {
+  run(`UPDATE table_assignments SET is_active=0, released_at=datetime('now','localtime')
+    WHERE assign_date=? AND table_number=? AND is_active=1`, [d, tableNo]);
+  saveDB();
+  showToast(`🪑 桌號 ${tableNo} 已釋放`, 'success');
+  // Re-trigger conflict check to update UI
+  checkTableConflict(d);
+}
+
 function releaseTable(tableNo, d) {
   run(`UPDATE table_assignments SET is_active=0, released_at=datetime('now','localtime') WHERE assign_date=? AND table_number=? AND is_active=1`, [d, tableNo]);
   showToast(`🪑 桌號 ${tableNo} 已標記離座`, 'info');
@@ -2293,7 +2304,9 @@ function checkWalkinTable() {
   const conflict = q(`SELECT room_number, guest_name FROM table_assignments WHERE assign_date=? AND table_number=? AND is_active=1`, [d, tableNo])[0];
   const wkConflict = q(`SELECT w.guest_name FROM walkin_guests w INNER JOIN table_assignments t ON t.assign_date=w.walkin_date AND t.table_number=w.table_number AND t.room_number='WALKIN' AND t.is_active=1 WHERE w.walkin_date=? AND w.table_number=? AND w.is_cancelled=0 LIMIT 1`, [d, tableNo])[0];
   if (conflict) {
-    msgEl.innerHTML = `<span style="color:var(--red)">🚫 已由住房 ${conflict.room_number} 號房使用中</span>`;
+    msgEl.innerHTML = `<span style="color:var(--red)">🚫 已由住房 ${conflict.room_number} 號房使用中</span>
+      <button class="btn btn-sm btn-warning" style="margin-left:12px"
+        onclick="releaseTableInline('${tableNo}','${d}');checkWalkinTable()">✅ 已離座，釋放此桌</button>`;
     document.getElementById('wk-table').style.borderColor = 'var(--red)';
   } else if (wkConflict) {
     msgEl.innerHTML = `<span style="color:var(--orange)">⚠️ 外客 ${wkConflict.guest_name} 已登記此桌</span>`;

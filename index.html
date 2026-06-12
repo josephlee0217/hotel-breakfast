@@ -1202,13 +1202,24 @@ function reEntryActionHTML(g, d, trafficCount) {
   const logs = q(`SELECT traffic_time FROM room_traffic WHERE traffic_date=? AND room_number=? AND direction='in' ORDER BY traffic_time DESC LIMIT 5`, [d, g.room_number]);
   const tableAssign = q(`SELECT table_number FROM table_assignments WHERE assign_date=? AND room_number=? AND is_active=1`, [d, g.room_number])[0];
   const rows = logs.map((l, i) => `<tr><td style="color:#888">#${trafficCount - i}</td><td>🚪 進入</td><td>${l.traffic_time.split(' ')[1]||l.traffic_time}</td></tr>`).join('');
+
   return `<div class="card">
     <div style="display:flex;gap:12px;align-items:center;margin-bottom:18px;flex-wrap:wrap">
       <div class="kpi green" style="flex:1;padding:14px">
         <div class="label">今日進入次數</div>
-        <div class="value" id="reentry-count">${trafficCount}</div>
+        <div class="value">${trafficCount}</div>
       </div>
-      ${tableAssign ? `<div class="kpi" style="flex:1;padding:14px;border-color:var(--blue)"><div class="label">桌號</div><div class="value" style="font-size:22px">${tableAssign.table_number}</div></div>` : ''}
+      ${tableAssign ? `<div class="kpi" style="flex:1;padding:14px;border-color:var(--blue)"><div class="label">上次桌號</div><div class="value" style="font-size:22px">${tableAssign.table_number}</div></div>` : ''}
+    </div>
+    <div style="margin-bottom:16px">
+      <div style="font-size:13px;color:#888;margin-bottom:8px;font-weight:600">桌號 <span style="color:var(--red)">*</span></div>
+      <input type="text" id="reentry-table"
+        placeholder="輸入桌號"
+        value="${tableAssign ? tableAssign.table_number : ''}"
+        oninput="checkReEntryTable('${d}','${g.room_number}')"
+        autocomplete="off"
+        style="width:100%;font-size:28px;font-weight:700;padding:16px 18px;border:3px solid var(--border);border-radius:12px;color:var(--navy);letter-spacing:2px">
+      <div id="reentry-table-msg" style="margin-top:8px;font-size:14px;font-weight:600"></div>
     </div>
     <button class="btn btn-success btn-lg btn-block" style="font-size:22px;padding:22px;margin-bottom:14px"
       onclick="recordReEntry('${g.room_number}','${g.guest_name}','${d}')">
@@ -1218,10 +1229,41 @@ function reEntryActionHTML(g, d, trafficCount) {
   </div>`;
 }
 
+function checkReEntryTable(d, currentRoom) {
+  const tableNo = document.getElementById('reentry-table')?.value.trim().toUpperCase();
+  const msgEl = document.getElementById('reentry-table-msg');
+  if (!msgEl) return;
+  if (!tableNo) { msgEl.innerHTML = ''; return; }
+  const conflict = q(`SELECT room_number FROM table_assignments WHERE assign_date=? AND table_number=? AND is_active=1 AND room_number!=?`, [d, tableNo, currentRoom])[0];
+  if (conflict) {
+    msgEl.innerHTML = `<span style="color:var(--red)">🚫 桌號 ${tableNo} 由 ${conflict.room_number} 號房使用中</span>
+      <button class="btn btn-sm btn-warning" style="margin-left:12px"
+        onclick="releaseTableInline('${tableNo}','${d}');checkReEntryTable('${d}','${currentRoom}')">✅ 已離座，釋放此桌</button>`;
+    document.getElementById('reentry-table').style.borderColor = 'var(--red)';
+  } else {
+    msgEl.innerHTML = `<span style="color:var(--green)">✅ 桌號 ${tableNo} 可使用</span>`;
+    document.getElementById('reentry-table').style.borderColor = 'var(--green)';
+  }
+}
+
 function recordReEntry(room, guestName, d) {
+  const tableNo = document.getElementById('reentry-table')?.value.trim().toUpperCase();
+  if (!tableNo) { showToast('請輸入桌號', 'error'); document.getElementById('reentry-table')?.focus(); return; }
+
+  // Check conflict (exclude same room)
+  const conflict = q(`SELECT room_number FROM table_assignments WHERE assign_date=? AND table_number=? AND is_active=1 AND room_number!=?`, [d, tableNo, room])[0];
+  if (conflict) { showToast(`🚫 桌號 ${tableNo} 已由 ${conflict.room_number} 號房使用中`, 'error'); return; }
+
+  // Release old table, assign new one
+  run(`UPDATE table_assignments SET is_active=0, released_at=datetime('now','localtime') WHERE assign_date=? AND room_number=? AND is_active=1`, [d, room]);
+  run(`INSERT INTO table_assignments(assign_date,table_number,room_number,guest_name,staff_name,is_active) VALUES(?,?,?,?,?,1)`, [d, tableNo, room, guestName, currentUser.display_name]);
+
+  // Record traffic
   run(`INSERT INTO room_traffic(traffic_date,room_number,guest_name,direction,staff_name) VALUES(?,?,?,'in',?)`, [d, room, guestName, currentUser.display_name]);
+
   const newCount = q(`SELECT COUNT(*) c FROM room_traffic WHERE traffic_date=? AND room_number=? AND direction='in'`, [d, room])[0]?.c || 0;
-  showToast(`✅ ${room} 號房 — 第 ${newCount} 次進入已記錄`, 'success');
+  showToast(`✅ ${room} 號房 → 桌號 ${tableNo}，第 ${newCount} 次進入已記錄`, 'success');
+  saveDB();
   clearVerify();
   refreshVerifyStats();
 }

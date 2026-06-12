@@ -443,6 +443,7 @@ table tr:hover td{background:var(--blue-lt)}
           <button class="btn btn-primary btn-lg" style="flex:2" onclick="doVerify()">🔎 驗證入場</button>
           <button class="btn btn-warning btn-lg" style="flex:1" onclick="openWalkinModal()">🚶 外客登記</button>
           <button class="btn btn-ghost" onclick="clearVerify()">🔄 清除</button>
+          <button class="btn btn-ghost btn-sm" style="color:#999;font-size:12px" onclick="releaseAllTables()" title="清除今日所有桌位占用">🪑 清桌</button>
         </div>
       </div>
 
@@ -1397,122 +1398,59 @@ function processFile(file) {
       reader.onload = async e => {
       try {
         const typedArray = new Uint8Array(e.target.result);
-        const loadingTask = pdfjsLib.getDocument({data: typedArray});
-        const pdf = await loadingTask.promise;
+        const pdf = await pdfjsLib.getDocument({data: typedArray}).promise;
+        let fullText = '';
 
-        // Collect ALL items with x,y positions across all pages
-        let allItems = [];
         for (let p = 1; p <= pdf.numPages; p++) {
           const page = await pdf.getPage(p);
           const vp = page.getViewport({scale: 1});
           const content = await page.getTextContent();
-          for (const item of content.items) {
-            allItems.push({
-              str: item.str.trim(),
-              x: Math.round(item.transform[4]),
-              // Convert PDF y (bottom-up) to top-down, offset by page
-              y: Math.round(vp.height - item.transform[5]) + (p - 1) * 10000,
-              page: p
-            });
+
+          // Step 1: collect items with positions
+          const items = content.items.map(item => ({
+            str: item.str,
+            x: item.transform[4],
+            y: Math.round(vp.height - item.transform[5]),
+            w: item.width || 0
+          })).filter(i => i.str.trim());
+
+          // Step 2: group into lines (merge items within 4pt vertically)
+          const lines = [];
+          for (const item of items) {
+            const existing = lines.find(l => Math.abs(l.y - item.y) <= 4);
+            if (existing) { existing.items.push(item); existing.y = (existing.y + item.y) / 2; }
+            else lines.push({y: item.y, items: [item]});
+          }
+
+          // Step 3: sort lines top-to-bottom, items left-to-right
+          lines.sort((a, b) => a.y - b.y);
+          for (const line of lines) {
+            line.items.sort((a, b) => a.x - b.x);
+            // Step 4: reconstruct text using item widths to decide spacing
+            let text = '';
+            let prevEndX = -9999;
+            for (const item of line.items) {
+              const gap = item.x - prevEndX;
+              text += (text && gap > 1.5) ? ' ' + item.str : item.str;
+              prevEndX = item.x + (item.w > 0 ? item.w : item.str.length * 4.5);
+            }
+            // Step 5: merge split fractions like "2 /0/0/ 0/0" → "2/0/0/0/0"
+            text = text.replace(/(\d)\s*\/\s*/g, '$1/').replace(/\/\s*(\d)/g, '/$1');
+            fullText += text.trim() + '\n';
           }
         }
 
-        // Find Breakfast column x from header
-        let bfX = null, dinnerX = null;
-        for (const item of allItems) {
-          if (item.str === 'Breakfast') bfX = item.x;
-          if (item.str === 'Dinner') dinnerX = item.x;
-        }
-        console.log('Breakfast x:', bfX, 'Dinner x:', dinnerX);
-
-        // Build line groups by y (within 4px)
-        const lineMap = new Map();
-        for (const item of allItems) {
-          if (!item.str) continue;
-          const yKey = Math.round(item.y / 4) * 4;
-          if (!lineMap.has(yKey)) lineMap.set(yKey, []);
-          lineMap.get(yKey).push(item);
-        }
-
-        // Sort lines top-to-bottom, items left-to-right
-        const sortedLines = [...lineMap.entries()]
-          .sort((a,b) => a[0] - b[0])
-          .map(([y, items]) => ({y, items: items.sort((a,b) => a.x - b.x)}));
-
-        // Parse each line
-        const fractionRe = /^(\d+)\/(\d+)\/\d+\/\d+\/\d+$/;
-        const dateRe = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
-        let currentDate = null;
-        const results = [];
-        const skipPfx = ['PdC','protel','Palais','Print','Page:','Room','phvlig','The','1.01','Total','Meal'];
-
-        for (const {items} of sortedLines) {
-          const lineStr = items.map(i => i.str).join(' ').trim();
-          if (!lineStr || skipPfx.some(w => lineStr.startsWith(w))) continue;
-
-          // Date header line
-          const dm = lineStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-          if (dm) {
-            currentDate = `${dm[3]}-${dm[1].padStart(2,'0')}-${dm[2].padStart(2,'0')}`;
-            continue;
-          }
-
-          // Data row: must have a 4-digit room number and fraction values
-          const roomItem = items.find(i => /^\d{4}$/.test(i.str));
-          if (!roomItem || !currentDate) continue;
-
-          // Get fraction items on this line
-          const fractions = items.filter(i => fractionRe.test(i.str));
-          if (fractions.length === 0) continue;
-
-          // Pick Breakfast fraction: closest x to bfX, or first fraction if bfX unknown
-          let bfFraction = fractions[0];
-          if (bfX !== null) {
-            bfFraction = fractions.reduce((best, cur) =>
-              Math.abs(cur.x - bfX) < Math.abs(best.x - bfX) ? cur : best
-            );
-          }
-
-          const fm = bfFraction.str.match(fractionRe);
-          const portions = parseInt(fm[1]) + parseInt(fm[2]);
-
-          // Get date items (CI/CO)
-          const dateItems = items.filter(i => dateRe.test(i.str));
-
-          // Name = all items before the room number item, joined
-          const roomIdx = items.indexOf(roomItem);
-          const nameParts = items.slice(0, roomIdx).map(i => i.str).filter(Boolean);
-          const guestName = nameParts.join(' ').trim();
-          if (!guestName) continue;
-
-          let ciDate = currentDate, coDate = currentDate;
-          if (dateItems.length >= 2) {
-            const d1 = dateItems[0].str.split('/');
-            const d2 = dateItems[1].str.split('/');
-            ciDate = `${d1[2]}-${d1[0].padStart(2,'0')}-${d1[1].padStart(2,'0')}`;
-            coDate = `${d2[2]}-${d2[0].padStart(2,'0')}-${d2[1].padStart(2,'0')}`;
-          }
-
-          results.push({
-            stay_date: currentDate,
-            room_number: roomItem.str,
-            guest_name: guestName,
-            has_breakfast: portions > 0 ? '1' : '0',
-            total_portions: String(portions),
-            used_portions: '0',
-            checkin_date: ciDate,
-            checkout_date: coDate,
-            adults: fm[1],
-            children: fm[2],
-          });
-        }
-
-        console.log('Parsed rows:', results.length, results.slice(0,3));
-        if (results.length === 0) {
+        console.log('PDF lines sample:', fullText.split('\n').slice(8, 16).join('\n'));
+        const data = parsePDFMealPlan(fullText);
+        if (data.length === 0) {
           showToast('⚠️ PDF 解析失敗，請確認為 protel Meal Plan 格式', 'error');
+          const preview = fullText.split('\n').slice(0, 20).join('\n');
+          document.getElementById('import-preview').innerHTML =
+            `<div class="alert alert-error">解析失敗，文字預覽：<pre style="font-size:11px;margin-top:8px;white-space:pre-wrap">${preview}</pre></div>`;
+          document.getElementById('import-preview').style.display = 'block';
           return;
         }
-        showImportPreview(results);
+        showImportPreview(data);
       } catch(err) {
         showToast('PDF 讀取失敗：' + err.message, 'error');
         console.error(err);
@@ -1998,6 +1936,14 @@ function refreshDashboard() {
   }
   const wkEl = document.getElementById('dash-walkin-tbody');
   if (wkEl) wkEl.innerHTML = wkTbody || '<tr><td colspan="8" style="text-align:center;color:#aaa">尚無外客記錄</td></tr>';
+}
+
+function releaseAllTables() {
+  const d = document.getElementById('v-date').value || today();
+  if (!confirm(`清除 ${d} 所有桌位占用記錄？（不影響入場記錄）`)) return;
+  run(`UPDATE table_assignments SET is_active=0, released_at=datetime('now','localtime') WHERE assign_date=? AND is_active=1`, [d]);
+  saveDB();
+  showToast('✅ 今日所有桌位已清除', 'success');
 }
 
 function releaseTableInline(tableNo, d) {

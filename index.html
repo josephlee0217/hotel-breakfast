@@ -1073,7 +1073,9 @@ function refreshVerifyStats() {
 }
 
 function doVerify() {
-  const input = document.getElementById('v-input').value.trim().toUpperCase();
+  const rawInput = document.getElementById('v-input').value.trim().toUpperCase();
+  // Auto-pad numeric room numbers to 4 digits (e.g. 703 → 0703)
+  const input = rawInput.match(/^\d{1,3}$/) ? rawInput.padStart(4, '0') : rawInput;
   const d = document.getElementById('v-date').value || today();
   const method = document.getElementById('v-method').value;
   if (!input) { showToast('請輸入房號', 'error'); return; }
@@ -2286,7 +2288,7 @@ function checkWalkinTable() {
   const msgEl = document.getElementById('wk-table-msg');
   if (!tableNo) { msgEl.innerHTML = ''; return; }
   const conflict = q(`SELECT room_number, guest_name FROM table_assignments WHERE assign_date=? AND table_number=? AND is_active=1`, [d, tableNo])[0];
-  const wkConflict = q(`SELECT guest_name FROM walkin_guests WHERE walkin_date=? AND table_number=? AND is_cancelled=0`, [d, tableNo])[0];
+  const wkConflict = q(`SELECT w.guest_name FROM walkin_guests w INNER JOIN table_assignments t ON t.assign_date=w.walkin_date AND t.table_number=w.table_number AND t.room_number='WALKIN' AND t.is_active=1 WHERE w.walkin_date=? AND w.table_number=? AND w.is_cancelled=0 LIMIT 1`, [d, tableNo])[0];
   if (conflict) {
     msgEl.innerHTML = `<span style="color:var(--red)">🚫 已由住房 ${conflict.room_number} 號房使用中</span>`;
     document.getElementById('wk-table').style.borderColor = 'var(--red)';
@@ -2313,14 +2315,15 @@ function confirmWalkin() {
   if (!phone) { showToast('請輸入手機號碼', 'error'); document.getElementById('wk-phone').focus(); return; }
   if (!tableNo) { showToast('請輸入桌號', 'error'); document.getElementById('wk-table').focus(); return; }
 
-  // 檢查桌號衝突（住房客人）
+  // 檢查桌號衝突（只擋使用中的桌）
   const conflict = q(`SELECT room_number FROM table_assignments WHERE assign_date=? AND table_number=? AND is_active=1`, [d, tableNo])[0];
   if (conflict) { showToast(`🚫 桌號 ${tableNo} 已由 ${conflict.room_number} 號房使用中`, 'error'); return; }
 
   run(`INSERT INTO walkin_guests(walkin_date,guest_name,phone,persons,table_number,portions,unit_price,payment_method,staff_name) VALUES(?,?,?,?,?,?,?,?,?)`,
     [d, name, phone, persons, tableNo, portions, price, payment, currentUser.display_name]);
 
-  // 同時記錄桌號佔用（標記為外客 WALKIN）
+  // 先把舊的桌號記錄標記離座，再插入新的
+  run(`UPDATE table_assignments SET is_active=0, released_at=datetime('now','localtime') WHERE assign_date=? AND table_number=? AND is_active=1`, [d, tableNo]);
   run(`INSERT INTO table_assignments(assign_date,table_number,room_number,guest_name,staff_name,is_active) VALUES(?,?,?,?,?,1)`,
     [d, tableNo, 'WALKIN', name, currentUser.display_name]);
 

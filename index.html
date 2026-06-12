@@ -1351,12 +1351,30 @@ function processFile(file) {
         for (let p = 1; p <= pdf.numPages; p++) {
           const page = await pdf.getPage(p);
           const content = await page.getTextContent();
-          const pageText = content.items.map(i => i.str).join(' ');
-          fullText += pageText + '\n';
+          // Build text line by line using y-position grouping
+          const items = content.items;
+          let lastY = null;
+          let lineText = '';
+          for (const item of items) {
+            const y = item.transform[5];
+            if (lastY !== null && Math.abs(y - lastY) > 3) {
+              fullText += lineText.trim() + '\n';
+              lineText = '';
+            }
+            lineText += item.str + ' ';
+            lastY = y;
+          }
+          if (lineText.trim()) fullText += lineText.trim() + '\n';
         }
+        console.log('PDF RAW TEXT:', fullText); // debug
         const data = parsePDFMealPlan(fullText);
         if (data.length === 0) {
-          showToast('⚠️ 解析失敗，請確認為 protel Meal Plan 格式', 'error');
+          // Show first 500 chars to help debug
+          const preview = fullText.substring(0, 500);
+          showToast(`⚠️ PDF 解析失敗（${pdf.numPages}頁，${fullText.length}字元）`, 'error');
+          document.getElementById('import-preview').innerHTML =
+            `<div class="alert alert-error">解析失敗，原始文字預覽：<br><pre style="font-size:11px;white-space:pre-wrap;margin-top:8px">${preview}</pre></div>`;
+          document.getElementById('import-preview').style.display='block';
           return;
         }
         showImportPreview(data);

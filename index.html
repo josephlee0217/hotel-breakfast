@@ -1353,29 +1353,32 @@ function processFile(file) {
         for (let p = 1; p <= pdf.numPages; p++) {
           const page = await pdf.getPage(p);
           const content = await page.getTextContent();
-          // Build text line by line using y-position grouping
           const items = content.items;
-          let lastY = null;
-          let lineText = '';
+
+          // Group items by y-position (same line = within 3px)
+          const lineMap = new Map();
           for (const item of items) {
-            const y = item.transform[5];
-            if (lastY !== null && Math.abs(y - lastY) > 3) {
-              fullText += lineText.trim() + '\n';
-              lineText = '';
-            }
-            lineText += item.str + ' ';
-            lastY = y;
+            const y = Math.round(item.transform[5] / 3) * 3; // bucket by 3px
+            const x = item.transform[4];
+            if (!lineMap.has(y)) lineMap.set(y, []);
+            lineMap.get(y).push({x, str: item.str});
           }
-          if (lineText.trim()) fullText += lineText.trim() + '\n';
+
+          // Sort lines top-to-bottom (descending y in PDF coords), items left-to-right
+          const sortedYs = [...lineMap.keys()].sort((a,b) => b - a);
+          for (const y of sortedYs) {
+            const lineItems = lineMap.get(y).sort((a,b) => a.x - b.x);
+            const lineText = lineItems.map(i => i.str).join(' ').trim();
+            if (lineText) fullText += lineText + '\n';
+          }
         }
-        console.log('PDF RAW TEXT:', fullText); // debug
+        console.log('PDF TEXT:', fullText.substring(0, 800));
         const data = parsePDFMealPlan(fullText);
         if (data.length === 0) {
-          // Show first 500 chars to help debug
-          const preview = fullText.substring(0, 500);
-          showToast(`⚠️ PDF 解析失敗（${pdf.numPages}頁，${fullText.length}字元）`, 'error');
+          const preview = fullText.substring(0, 600);
+          showToast(`⚠️ PDF 解析失敗（${pdf.numPages}頁）`, 'error');
           document.getElementById('import-preview').innerHTML =
-            `<div class="alert alert-error">解析失敗，原始文字預覽：<br><pre style="font-size:11px;white-space:pre-wrap;margin-top:8px">${preview}</pre></div>`;
+            `<div class="alert alert-error">解析失敗，原始文字：<br><pre style="font-size:11px;white-space:pre-wrap;margin-top:8px">${preview}</pre></div>`;
           document.getElementById('import-preview').style.display='block';
           return;
         }
